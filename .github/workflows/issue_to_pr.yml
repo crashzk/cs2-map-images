@@ -1,0 +1,119 @@
+# GitHub Action: Collect attachments, rename by map name, open PR, and comment
+
+name: Issue Attachment Collector
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  collect-and-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Collect attachments, rename, commit, open PR, and comment
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const https = require('https');
+            const { execSync } = require('child_process');
+
+            // Parse payload
+            const payload     = context.payload.comment || context.payload.issue;
+            const body        = (payload.body || '') + '\n';
+            const issueNumber = context.payload.issue.number;
+            const targetDir   = 'cs2';
+
+            // Extract Map name
+            const mapMatch = body.match(/^Map:\s*(\S.*)$/m);
+            if (!mapMatch) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: issueNumber,
+                body: `⚠️ I couldn't find a \`Map: <name>\` field in the issue description. Please create a new issue with the correct message format!`
+              });
+              console.log('Map name missing; exiting.');
+              return;
+            }
+            const mapName = mapMatch[1].trim().replace(/[\\/\s]/g, '_');
+
+            // Extract attachments
+            const urls = Array.from(body.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g), m => m[1]);
+            if (urls.length === 0) {
+              console.log('No attachments found; exiting.');
+              return;
+            }
+
+            // Create branch
+            const branch = `issue-${issueNumber}-attachments`;
+            execSync(`git checkout -b ${branch}`);
+            fs.mkdirSync(targetDir, { recursive: true });
+
+            // Download utility
+            async function download(url) {
+              return new Promise((resolve, reject) => {
+                const parsed = new URL(url);
+                const opts = { hostname: parsed.hostname, path: parsed.pathname + parsed.search, headers: { 'User-Agent': 'github-script' } };
+                https.get(opts, res => {
+                  if ([301,302,307,308].includes(res.statusCode) && res.headers.location) {
+                    return resolve(download(res.headers.location));
+                  }
+                  const chunks = [];
+                  res.on('data', c => chunks.push(c));
+                  res.on('end', () => {
+                    const buffer = Buffer.concat(chunks);
+                    let ext = '';
+                    const ctype = res.headers['content-type'] || '';
+                    const match = ctype.match(/image\/(\w+)/);
+                    if (match) ext = `.${match[1]}`;
+                    resolve({ buffer, ext });
+                  });
+                }).on('error', reject);
+              });
+            }
+
+            // Download and rename
+            const savedNames = [];
+            for (let i = 0; i < urls.length; i++) {
+              const url = urls[i];
+              console.log(`Downloading ${url}`);
+              const { buffer, ext } = await download(url);
+              const name = urls.length === 1
+                ? `${mapName}${ext}`
+                : `${mapName}_${i+1}${ext}`;
+              const filePath = path.join(targetDir, name);
+              fs.writeFileSync(filePath, buffer);
+              console.log(`Saved ${name} (${buffer.length} bytes)`);
+              savedNames.push(name);
+            }
+
+            // Commit, push
+            execSync('git config user.name "github-actions[bot]"');
+            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+            execSync(`git add ${targetDir}`);
+            execSync(`git commit -m "Add ${savedNames.length} attachment(s) for map '${mapName}' from issue #${issueNumber}"`);
+            execSync(`git push -u origin ${branch}`);
+
+            // Create PR
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              head:  branch,
+              base:  context.payload.repository.default_branch,
+              title: `Auto: Add ${savedNames.length} attachment(s) for map '${mapName}' (issue #${issueNumber})`,
+              body:  `This PR adds ${savedNames.length} attachment(s) renamed to **${mapName}** in **${targetDir}/** for issue #${issueNumber}.`
+            });
+
+            // Comment on issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: issueNumber,
+              body: `✅ Created a PR for **${mapName}**, PR [#${pr.number}](${pr.html_url}).`
+            });
