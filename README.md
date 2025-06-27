@@ -11,7 +11,7 @@ Here are map screenshots that you can use for your CS2-related projects. The goa
 7. The image name must be the exact map filename, for example **`de_mirage.png`**.
 8. All images must be placed in the CS2 folder. This way people can link to it and simply change the map name in their URL for their project.
 9. No logos or URLs in the images.
-
+=========
 You can add maps to this repository by creating an issue with the image attached.
 **You must also include `Map: mapname` in the issue description! This must be exactly the same as the in-game map name!**
 
